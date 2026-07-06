@@ -393,8 +393,6 @@ export class CDPService extends EventEmitter {
 
   private async handlePageRequest(request: HTTPRequest, page: Page) {
     const url = request.url();
-    const headers = request.headers();
-    delete headers["accept-language"]; // Patch to help with headless detection
 
     const parsed = tryParseUrl(url);
 
@@ -444,7 +442,7 @@ export class CDPService extends EventEmitter {
       page.close().catch(() => {});
       this.endSession(ShutdownReason.SECURITY_VIOLATION);
     } else {
-      await request.continue({ headers });
+      await request.continue();
     }
   }
 
