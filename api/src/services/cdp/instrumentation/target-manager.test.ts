@@ -58,4 +58,36 @@ describe("TargetInstrumentationManager", () => {
       }),
     );
   });
+
+  it("enables network on Puppeteer's paused worker session", async () => {
+    const session = new EventEmitter() as EventEmitter & {
+      send: ReturnType<typeof vi.fn>;
+      id: () => string;
+    };
+    const send = vi.fn().mockResolvedValue({});
+    session.send = send;
+    session.id = () => "cdp-session";
+
+    const target = {
+      _targetId: "worker-target",
+      _getTargetInfo: () => ({ type: "worker" }),
+      _session: () => session,
+      url: () => "blob:https://example.com/worker",
+      createCDPSession: vi.fn().mockRejectedValue(new Error("must reuse paused session")),
+    } as unknown as Target;
+    const logger = {
+      record: vi.fn(),
+      resetContext: vi.fn(),
+      setContext: vi.fn(),
+      getContext: vi.fn().mockReturnValue({}),
+    };
+    const manager = new TargetInstrumentationManager(logger, { error: vi.fn() } as any, {
+      captureWorkerNetwork: true,
+    });
+
+    await manager.attach(target, TargetType.OTHER);
+
+    expect(target.createCDPSession).not.toHaveBeenCalled();
+    expect(send.mock.calls[0]?.[0]).toBe("Network.enable");
+  });
 });

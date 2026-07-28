@@ -1,0 +1,18 @@
+{
+  "functions": {
+    "api/collect.js": {
+      "maxDuration": 10
+    }
+  },
+  "headers": [
+    {
+      "source": "/worker.js",
+      "headers": [
+        {
+          "key": "Access-Control-Allow-Origin",
+          "value": "*"
+        }
+      ]
+    }
+  ]
+}

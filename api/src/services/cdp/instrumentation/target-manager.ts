@@ -21,6 +21,7 @@ export interface TargetInstrumentationOptions extends AttachPageEventsOptions {
 export class TargetInstrumentationManager {
   private attachedSessions = new Set<string>();
   private cdpSessions = new Map<string, CDPSession>();
+  private puppeteerOwnedSessions = new Set<string>();
 
   private instrumentationOptions: TargetInstrumentationOptions;
 
@@ -112,15 +113,57 @@ export class TargetInstrumentationManager {
       }
 
       case TargetType.OTHER: {
-        const session = await target.createCDPSession();
+        // Puppeteer pauses dedicated workers before publishing targetcreated, but resumes
+        // them immediately after the event. Reuse that session so Network is enabled before
+        // the worker can issue its first request instead of creating a second, late session.
+        const existingSession =
+          isDedicatedWorker &&
+          this.instrumentationOptions.captureWorkerNetwork === true
+            ? (target as any)._session?.()
+            : undefined;
+        const session = existingSession ?? (await target.createCDPSession());
         this.cdpSessions.set(sessionId, session);
-        await this.enableDomainsForTarget(session, type, isExtensionTarget, isDedicatedWorker);
-        attachCDPEvents(session, this.logger);
+        if (existingSession) this.puppeteerOwnedSessions.add(sessionId);
 
         if (isExtensionTarget) {
+          await this.enableDomainsForTarget(session, type, isExtensionTarget, isDedicatedWorker);
+          attachCDPEvents(session, this.logger);
           await attachExtensionEvents(target, this.logger, INTERNAL_EXTENSIONS, this.appLogger);
         } else if (isDedicatedWorker) {
+          if (existingSession) {
+            attachCDPEvents(session, this.logger);
+            attachWorkerEvents(target, session, this.logger, type, this.workerEventsOptions());
+
+            // Queue network capture before yielding. Puppeteer's target
+            // manager sends Runtime.runIfWaitingForDebugger after targetcreated returns.
+            const networkEnabled =
+              this.instrumentationOptions.captureWorkerNetwork === true
+                ? session.send("Network.enable").catch((err) => {
+                    this.appLogger.error(
+                      { err },
+                      `[TargetManager] Failed to enable Network for ${type}:`,
+                    );
+                  })
+                : Promise.resolve();
+            await Promise.all([
+              networkEnabled,
+              this.enableDomainsForTarget(
+                session,
+                type,
+                false,
+                isDedicatedWorker,
+                this.instrumentationOptions.captureWorkerNetwork === true,
+              ),
+            ]);
+            break;
+          }
+
+          await this.enableDomainsForTarget(session, type, false, isDedicatedWorker);
+          attachCDPEvents(session, this.logger);
           attachWorkerEvents(target, session, this.logger, type, this.workerEventsOptions());
+        } else {
+          await this.enableDomainsForTarget(session, type, false, isDedicatedWorker);
+          attachCDPEvents(session, this.logger);
         }
         break;
       }
@@ -145,6 +188,7 @@ export class TargetInstrumentationManager {
     const session = this.cdpSessions.get(targetId);
     if (session) {
       this.cdpSessions.delete(targetId);
+      if (this.puppeteerOwnedSessions.delete(targetId)) return;
       session.detach().catch(() => {
         // Session may already be closed if the target was destroyed
       });
@@ -156,6 +200,7 @@ export class TargetInstrumentationManager {
     type: TargetType,
     isExtension: boolean,
     isDedicatedWorker = false,
+    networkAlreadyEnabled = false,
   ): Promise<void> {
     const enabledDomains = new Set<string>();
 
@@ -182,7 +227,10 @@ export class TargetInstrumentationManager {
       case TargetType.SHARED_WORKER:
         await enable("Runtime");
         await enable("Log");
-        if (isExtension || this.instrumentationOptions.captureWorkerNetwork === true) {
+        if (
+          !networkAlreadyEnabled &&
+          (isExtension || this.instrumentationOptions.captureWorkerNetwork === true)
+        ) {
           await enable("Network");
         }
         break;
@@ -192,7 +240,10 @@ export class TargetInstrumentationManager {
         if (isExtension || isDedicatedWorker) {
           await enable("Runtime");
           await enable("Log");
-          if (isExtension || this.instrumentationOptions.captureWorkerNetwork === true) {
+          if (
+            !networkAlreadyEnabled &&
+            (isExtension || this.instrumentationOptions.captureWorkerNetwork === true)
+          ) {
             await enable("Network");
           }
         }

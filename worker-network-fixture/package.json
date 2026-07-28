@@ -1,0 +1,7 @@
+{
+  "name": "steel-worker-network-fixture",
+  "private": true,
+  "engines": {
+    "node": ">=20"
+  }
+}
