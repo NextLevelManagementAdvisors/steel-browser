@@ -9,6 +9,7 @@ import { attachExtensionEvents } from "./extension-events.js";
 import { attachWorkerEvents } from "./worker-events.js";
 import type { AttachWorkerEventsOptions } from "./worker-events.js";
 import { BrowserLogger } from "./browser-logger.js";
+import type { TargetSessionContext } from "../plugins/core/base-plugin.js";
 
 const INTERNAL_EXTENSIONS = new Set<string>([
   // TODO: need secret manager, recorder, and capacha IDs
@@ -29,6 +30,7 @@ export class TargetInstrumentationManager {
     private logger: BrowserLogger,
     private appLogger: FastifyBaseLogger,
     instrumentationOptions?: TargetInstrumentationOptions,
+    private onTargetSession?: (context: TargetSessionContext) => Promise<void>,
   ) {
     this.instrumentationOptions = instrumentationOptions ?? {};
   }
@@ -116,11 +118,7 @@ export class TargetInstrumentationManager {
         // Puppeteer pauses dedicated workers before publishing targetcreated, but resumes
         // them immediately after the event. Reuse that session so Network is enabled before
         // the worker can issue its first request instead of creating a second, late session.
-        const existingSession =
-          isDedicatedWorker &&
-          this.instrumentationOptions.captureWorkerNetwork === true
-            ? (target as any)._session?.()
-            : undefined;
+        const existingSession = isDedicatedWorker ? (target as any)._session?.() : undefined;
         const session = existingSession ?? (await target.createCDPSession());
         this.cdpSessions.set(sessionId, session);
         if (existingSession) this.puppeteerOwnedSessions.add(sessionId);
@@ -131,6 +129,13 @@ export class TargetInstrumentationManager {
           await attachExtensionEvents(target, this.logger, INTERNAL_EXTENSIONS, this.appLogger);
         } else if (isDedicatedWorker) {
           if (existingSession) {
+            await this.onTargetSession?.({
+              target,
+              type,
+              session,
+              isDedicatedWorker,
+              isPuppeteerPaused: true,
+            });
             attachCDPEvents(session, this.logger);
             attachWorkerEvents(target, session, this.logger, type, this.workerEventsOptions());
 

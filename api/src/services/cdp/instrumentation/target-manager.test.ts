@@ -81,13 +81,22 @@ describe("TargetInstrumentationManager", () => {
       setContext: vi.fn(),
       getContext: vi.fn().mockReturnValue({}),
     };
+    const onTargetSession = vi.fn().mockResolvedValue(undefined);
     const manager = new TargetInstrumentationManager(logger, { error: vi.fn() } as any, {
       captureWorkerNetwork: true,
-    });
+    }, onTargetSession);
 
     await manager.attach(target, TargetType.OTHER);
 
     expect(target.createCDPSession).not.toHaveBeenCalled();
+    expect(onTargetSession).toHaveBeenCalledWith(
+      expect.objectContaining({
+        target,
+        session,
+        isDedicatedWorker: true,
+        isPuppeteerPaused: true,
+      }),
+    );
     expect(send.mock.calls[0]?.[0]).toBe("Network.enable");
   });
 });
