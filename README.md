@@ -106,6 +106,20 @@ For Mac Silicon users, you will need to pass this env flag to the Docker compose
 DOCKER_DEFAULT_PLATFORM=linux/arm64 docker compose up
 ```
 
+## Bitwarden extension (baked in)
+
+`api/extensions/bitwarden-manifest-key.txt` fixes the Chrome extension ID
+of the baked-in Bitwarden browser extension (see the Dockerfile's
+`bitwarden-build` stage) so it stays the same across image rebuilds --
+steel-orchestrator's per-tenant vault-profile bind-mounts are keyed on
+this ID. Do not regenerate this key casually: doing so changes the
+extension ID and orphans every tenant's already-persisted vault-profile
+directory with no error, no warning.
+
+Pinned Bitwarden version: `browser-v2026.7.0` (a tag on
+github.com/bitwarden/clients). Bumping it is a deliberate, separate
+change -- read the release notes for that tag range first.
+
 ## Quickstart for Contributors
 When developing locally, you will need to run the [`docker-compose.dev.yml`](./docker-compose.dev.yml) file instead of the default [`docker-compose.yml`](./docker-compose.yml) file so that your local changes are reflected. Doing this will build the Docker images from the [`api`](./api) and [`ui`](./ui) directories and run the server and UI on port 3000 and 5173 respectively.
 
