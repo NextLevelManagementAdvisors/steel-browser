@@ -761,7 +761,7 @@ export class CDPService extends EventEmitter {
 
         const extensionPaths = await executeCritical(
           async () => {
-            const defaultExtensions = isHeadless ? ["recorder"] : [];
+            const defaultExtensions = [...(isHeadless ? ["recorder"] : []), "bitwarden"];
             const customExtensions = this.launchConfig!.extensions
               ? [...this.launchConfig!.extensions]
               : [];

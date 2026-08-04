@@ -161,6 +161,26 @@ COPY --from=api-build /app /app
 # named extension.
 COPY --from=bitwarden-build /bw/apps/browser/build /app/api/extensions/bitwarden
 
+# Pre-sets the Bitwarden extension's self-hosted server URL via Chrome's
+# native 3rd-party-extension managed-policy mechanism, so a tenant's first
+# login never has to manually type the server URL -- Bitwarden's own
+# manifest.json already declares a managed_schema accepting this
+# ("environment": {"base": ...}), confirmed directly in bitwarden/clients.
+RUN mkdir -p /etc/chromium/policies/managed && \
+    cat > /etc/chromium/policies/managed/bitwarden.json <<'EOF'
+{
+  "3rdparty": {
+    "extensions": {
+      "jkigehmlkjibeeipffdneofilhmdebbm": {
+        "environment": {
+          "base": "https://vault.nlma.io"
+        }
+      }
+    }
+  }
+}
+EOF
+
 # Copy the built UI from ui-build stage into the API container
 COPY --from=ui-build /app/ui/dist /app/ui/dist
 
