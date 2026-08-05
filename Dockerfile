@@ -1,5 +1,13 @@
 ARG NODE_VERSION=22.13.0
 
+# Narrowly-scoped build arg for the bitwarden-build stage only (see below).
+# Declared here, before the first FROM, because Docker only expands a later
+# FROM's image reference using ARGs declared before the FIRST FROM in the
+# file -- an ARG placed between two stages is parsed as part of the
+# preceding stage's body, not as a new global-scope declaration, so it would
+# NOT be visible to `FROM node:${BITWARDEN_NODE_VERSION}` below.
+ARG BITWARDEN_NODE_VERSION=24.17.0
+
 FROM node:${NODE_VERSION} AS base
 
 WORKDIR /app
@@ -31,6 +39,43 @@ COPY --link ui/ ./ui/
 # Install UI dependencies and build with correct base path
 RUN npm ci --include=dev -w ui --ignore-scripts
 RUN VITE_API_URL="" VITE_WS_URL="" npm run build -w ui -- --base=/ui
+
+# Stage: Build Bitwarden browser extension (pinned, third-party source)
+# Uses its own BITWARDEN_NODE_VERSION build arg (declared before the first
+# FROM, at the top of this file -- not the shared NODE_VERSION) because
+# bitwarden/clients at BITWARDEN_TAG requires Node >=24.17.0 / npm ~11,
+# while NODE_VERSION stays pinned at 22.13.0 for every other stage and the
+# runtime image. This stage's only output is a static build/ directory
+# copied into `production` below, so its Node version has no effect on the
+# runtime image's Node version.
+FROM node:${BITWARDEN_NODE_VERSION} AS bitwarden-build
+
+ARG BITWARDEN_TAG=browser-v2026.7.0
+
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y git && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /bw
+RUN git clone --depth 1 --branch ${BITWARDEN_TAG} https://github.com/bitwarden/clients.git .
+
+# Root-only install, per bitwarden/clients' own contributing docs -- installing
+# per-app dependencies separately is explicitly unsupported there.
+RUN npm ci
+
+WORKDIR /bw/apps/browser
+RUN npm run build:prod:chrome
+
+# Inject our own fixed manifest key so Chrome derives the same extension ID on
+# every rebuild of THIS image -- see api/extensions/bitwarden-manifest-key.txt
+# and the README section next to it for why this matters.
+COPY api/extensions/bitwarden-manifest-key.txt /tmp/bitwarden-manifest-key.txt
+RUN node -e " \
+  const fs = require('fs'); \
+  const manifestPath = './build/manifest.json'; \
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8')); \
+  manifest.key = fs.readFileSync('/tmp/bitwarden-manifest-key.txt', 'utf8').trim(); \
+  fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2)); \
+"
 
 # Stage 2: Build API
 FROM base AS api-build
@@ -109,6 +154,32 @@ RUN mkdir -p /files
 
 # Copy the built API from api-build stage
 COPY --from=api-build /app /app
+
+# Bitwarden extension: built in its own stage above (third-party source, not
+# vendored into this repo's git history) and copied into the same
+# api/extensions/<name>/ layout getExtensionPaths() expects for every other
+# named extension.
+COPY --from=bitwarden-build /bw/apps/browser/build /app/api/extensions/bitwarden
+
+# Pre-sets the Bitwarden extension's self-hosted server URL via Chrome's
+# native 3rd-party-extension managed-policy mechanism, so a tenant's first
+# login never has to manually type the server URL -- Bitwarden's own
+# manifest.json already declares a managed_schema accepting this
+# ("environment": {"base": ...}), confirmed directly in bitwarden/clients.
+RUN mkdir -p /etc/chromium/policies/managed && \
+    cat > /etc/chromium/policies/managed/bitwarden.json <<'EOF'
+{
+  "3rdparty": {
+    "extensions": {
+      "jkigehmlkjibeeipffdneofilhmdebbm": {
+        "environment": {
+          "base": "https://vault.nlma.io"
+        }
+      }
+    }
+  }
+}
+EOF
 
 # Copy the built UI from ui-build stage into the API container
 COPY --from=ui-build /app/ui/dist /app/ui/dist

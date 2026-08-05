@@ -106,6 +106,32 @@ For Mac Silicon users, you will need to pass this env flag to the Docker compose
 DOCKER_DEFAULT_PLATFORM=linux/arm64 docker compose up
 ```
 
+## Bitwarden extension (baked in)
+
+`api/extensions/bitwarden-manifest-key.txt` fixes the Chrome extension ID
+of the baked-in Bitwarden browser extension (see the Dockerfile's
+`bitwarden-build` stage) so it stays the same across image rebuilds --
+steel-orchestrator's per-tenant vault-profile bind-mounts are keyed on
+this ID. Do not regenerate this key casually: doing so changes the
+extension ID and orphans every tenant's already-persisted vault-profile
+directory with no error, no warning.
+
+Pinned Bitwarden version: `browser-v2026.7.0` (a tag on
+github.com/bitwarden/clients). Bumping it is a deliberate, separate
+change -- read the release notes for that tag range first.
+
+Baked-in extension ID (computed from the fixed manifest key via Chrome's
+standard extension-ID derivation algorithm -- SHA-256 of the DER
+SubjectPublicKeyInfo bytes in `api/extensions/bitwarden-manifest-key.txt`,
+first 16 bytes, each nibble mapped to `a`-`p` instead of hex `0`-`f`):
+`jkigehmlkjibeeipffdneofilhmdebbm`
+
+steel-orchestrator's dockerClient.ts hardcodes this exact ID as a named
+constant (`BITWARDEN_EXTENSION_ID`) -- if this extension is ever rebuilt
+with a DIFFERENT manifest key, that constant must be updated to match, or
+every tenant's persisted vault-profile mount silently stops landing on the
+right storage path.
+
 ## Quickstart for Contributors
 When developing locally, you will need to run the [`docker-compose.dev.yml`](./docker-compose.dev.yml) file instead of the default [`docker-compose.yml`](./docker-compose.yml) file so that your local changes are reflected. Doing this will build the Docker images from the [`api`](./api) and [`ui`](./ui) directories and run the server and UI on port 3000 and 5173 respectively.
 

@@ -26,6 +26,7 @@ dist
 .aider*
 extensions/*
 !extensions/recorder
+!extensions/bitwarden-manifest-key.txt
 files/*
 static/*
 # Ignore future changes to this file
