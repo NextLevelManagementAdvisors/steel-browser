@@ -3,20 +3,25 @@ import { useState } from "react";
 import SessionDetails from "./session-details";
 import SessionLogs from "./session-logs";
 import SessionDevTools from "./session-devtools";
+import SessionVault from "./session-vault";
 
 interface SessionConsoleProps {
   id: string | null;
 }
 
 export default function SessionConsole({ id }: SessionConsoleProps) {
-  const [activeTab, setActiveTab] = useState<"details" | "logs" | "dev-tools">(
-    "details"
-  );
+  const [activeTab, setActiveTab] = useState<
+    "details" | "logs" | "dev-tools" | "vault"
+  >("details");
 
-  const tabs: { value: "details" | "logs" | "dev-tools"; label: string }[] = [
+  const tabs: {
+    value: "details" | "logs" | "dev-tools" | "vault";
+    label: string;
+  }[] = [
     { value: "details", label: "Details" },
     { value: "logs", label: "Logs" },
     { value: "dev-tools", label: "Dev Tools" },
+    { value: "vault", label: "Vault" },
   ];
 
   return (
@@ -45,6 +50,7 @@ export default function SessionConsole({ id }: SessionConsoleProps) {
       {activeTab === "details" && <SessionDetails id={id} />}
       {activeTab === "logs" && <SessionLogs id={id!} />}
       {activeTab === "dev-tools" && <SessionDevTools />}
+      {activeTab === "vault" && <SessionVault />}
     </div>
   );
 }
