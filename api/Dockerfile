@@ -72,6 +72,34 @@ RUN node -e " \
   fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2)); \
 "
 
+# Stage: Fetch the official "Claude in Chrome" extension. Closed-source,
+# Chrome-Web-Store-only (unlike Bitwarden), so this stage downloads the
+# signed CRX from Google's own update endpoint at build time instead of
+# building from source -- nothing proprietary is vendored into this repo's
+# git history, same as the bitwarden-build stage's own "not vendored" note.
+# Verified separately: the CRX3's manifest.json already carries its own
+# `key` field, and SHA-256 of that DER key derives extension id
+# fcoeoabgfenejglbffodgkkbkcdhcgfn -- the real Chrome Web Store id for
+# "Claude" -- so no manifest-key pinning is needed here unlike bitwarden.
+FROM alpine:3.20 AS claude-extension
+
+ARG CLAUDE_EXTENSION_ID=fcoeoabgfenejglbffodgkkbkcdhcgfn
+
+RUN apk add --no-cache curl unzip
+
+WORKDIR /ext
+# CRX3 layout: 4-byte magic "Cr24", u32 version, u32 header length, then
+# that many bytes of header proto, then the zip payload -- strip the header
+# with od/tail rather than a scripting runtime, since this stage's only job
+# is to produce a directory, not run JS.
+RUN curl -sL -o claude.crx \
+      "https://clients2.google.com/service/update2/crx?response=redirect&acceptformat=crx3&prodversion=127.0&x=id%3D${CLAUDE_EXTENSION_ID}%26uc" && \
+    headerlen=$(od -An -tu4 -j 8 -N 4 claude.crx | tr -d ' ') && \
+    tail -c +$((12 + headerlen + 1)) claude.crx > claude.zip && \
+    mkdir -p /out && \
+    unzip -q claude.zip -d /out && \
+    rm claude.crx claude.zip
+
 FROM base AS build
 
 RUN apt-get update && \
@@ -161,6 +189,17 @@ COPY --from=build /app /app
 # COPY --from=build /app /app line immediately above -- not "fixing" that
 # pre-existing ordering as a drive-by change.
 COPY --from=bitwarden-build /bw/apps/browser/build /app/api/extensions/bitwarden
+
+# Claude in Chrome: opt-in named extension only -- a session must explicitly
+# request it (POST /v1/sessions {"extensions": ["claude"]}, per
+# getExtensionPaths()'s customExtensions path). Deliberately NOT added to
+# cdp.service.ts's defaultExtensions like bitwarden is: pooled containers are
+# fresh per session, this extension requires an interactive Anthropic
+# sign-in that doesn't survive a fresh profile, and every pooled container
+# already runs close to POOL_CONTAINER_MEMORY_MB -- making it default-on
+# would add a second MV3 service worker + <all_urls> host permissions to
+# every session for a feature that's signed out by default anyway.
+COPY --from=claude-extension /out /app/api/extensions/claude
 
 # Pre-sets the Bitwarden extension's self-hosted server URL via Chrome's
 # native 3rd-party-extension managed-policy mechanism, so a tenant's first
