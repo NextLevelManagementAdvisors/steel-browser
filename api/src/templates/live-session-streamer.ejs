@@ -124,9 +124,63 @@
             position: absolute;
             height: 100%;
             width: auto;
+            top: 50%;
             left: 50%;
-            transform: translateX(-50%);
+            transform: translate(-50%, -50%);
             object-fit: contain;
+          }
+
+          /* On-screen keyboard support for touch devices. A canvas cannot take
+             text focus, so a phone never raises its keyboard for it: this
+             off-screen field holds focus instead and its input is forwarded. */
+          .mobile-keyboard-input {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 1px;
+            height: 1px;
+            padding: 0;
+            border: 0;
+            margin: 0;
+            opacity: 0;
+            resize: none;
+            outline: none;
+            pointer-events: none;
+            caret-color: transparent;
+            /* 16px keeps iOS from zooming the page when the field takes focus */
+            font-size: 16px;
+          }
+          .mobile-keyboard-toggle {
+            display: none;
+            position: absolute;
+            right: 12px;
+            bottom: 12px;
+            z-index: 30;
+            width: 48px;
+            height: 48px;
+            padding: 0;
+            border-radius: 50%;
+            border: 1px solid var(--border-color);
+            background: var(--bg-secondary);
+            color: var(--text-color);
+            align-items: center;
+            justify-content: center;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+            cursor: pointer;
+            -webkit-tap-highlight-color: transparent;
+            touch-action: manipulation;
+          }
+          .mobile-keyboard-toggle svg {
+            width: 26px;
+            height: 26px;
+            fill: currentColor;
+          }
+          html.touch-input .mobile-keyboard-toggle {
+            display: flex;
+          }
+          html.keyboard-open .mobile-keyboard-toggle {
+            background: var(--text-color);
+            color: var(--bg-secondary);
           }
 
           /* Tab bar styles */
@@ -486,6 +540,17 @@
         <% } %>
         <div class="content" id="content">
             <!-- Canvas containers will be dynamically added here -->
+            <% if (interactive) { %>
+            <textarea id="mobile-keyboard-input" class="mobile-keyboard-input" tabindex="-1" rows="1"
+                autocapitalize="off" autocomplete="off" autocorrect="off" spellcheck="false"
+                aria-label="Type into the remote browser"></textarea>
+            <button type="button" id="mobile-keyboard-toggle" class="mobile-keyboard-toggle"
+                aria-label="Toggle on-screen keyboard" aria-pressed="false">
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M20 5H4c-1.1 0-1.99.9-1.99 2L2 17c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm-9 3h2v2h-2V8zm0 3h2v2h-2v-2zM8 8h2v2H8V8zm0 3h2v2H8v-2zm-1 2H5v-2h2v2zm0-3H5V8h2v2zm9 7H8v-2h8v2zm0-4h-2v-2h2v2zm0-3h-2V8h2v2zm3 3h-2v-2h2v2zm0-3h-2V8h2v2z"/>
+                </svg>
+            </button>
+            <% } %>
         </div>
     </div>
 
@@ -503,6 +568,8 @@
           const forwardButton = document.getElementById('forward-button');
           const refreshButton = document.getElementById('refresh-button');
           const connectionStatus = document.getElementById('connection-status');
+          const mobileKeyboardInput = document.getElementById('mobile-keyboard-input');
+          const mobileKeyboardToggle = document.getElementById('mobile-keyboard-toggle');
 
           let tabs = {};
           let activeTabId = null;
@@ -998,6 +1065,12 @@
 
               // MouseDown event
               canvas._mouseDownHandler = (e) => {
+                  // Tapping the page must not take focus (and the on-screen
+                  // keyboard) away from the mobile keyboard field.
+                  if (mobileKeyboardInput && document.activeElement === mobileKeyboardInput) {
+                      e.preventDefault();
+                  }
+
                   if (ws.readyState !== WebSocket.OPEN) return;
 
                   const coords = getScaledCoordinates(e, canvas, pageId);
@@ -1122,6 +1195,216 @@
               return true;
           }
 
+          // ---- On-screen keyboard for touch devices ----
+          // The remote page is painted on a canvas, which cannot take text
+          // focus, so a phone or tablet never shows its keyboard for it. The
+          // keyboard button focuses an off-screen textarea instead, and what is
+          // typed there is replayed to the remote page.
+          //
+          // Soft keyboards do not report usable keydown events (Android sends
+          // keyCode 229, and autocorrect, swipe typing and dictation send no
+          // key events at all), so text is taken from the field's input events:
+          // each change is diffed against the last known value and sent as
+          // Backspace presses plus the new characters. The field always starts
+          // with one invisible character so Backspace still produces an input
+          // event when nothing has been typed yet.
+          const MOBILE_KEYBOARD_SENTINEL = '\u200B';
+          const MOBILE_KEYBOARD_MAX_BUFFER = 200;
+          let mobileKeyboardMirror = MOBILE_KEYBOARD_SENTINEL;
+          let mobileKeyboardComposing = false;
+
+          function sendRemoteKeyPress(key, code, keyCode, text) {
+              if (!activeTabId || !tabs[activeTabId] || !tabs[activeTabId].websocket) return;
+
+              const ws = tabs[activeTabId].websocket;
+              if (ws.readyState !== WebSocket.OPEN) return;
+
+              ['keyDown', 'keyUp'].forEach((type) => {
+                  ws.send(JSON.stringify({
+                      type: 'keyEvent',
+                      pageId: activeTabId,
+                      event: { type, text, code, key, keyCode }
+                  }));
+              });
+          }
+
+          function sendRemoteText(chars) {
+              chars.forEach((char) => {
+                  if (char === '\n' || char === '\r') {
+                      sendRemoteKeyPress('Enter', 'Enter', 13, '\r');
+                  } else if (char === '\t') {
+                      sendRemoteKeyPress('Tab', 'Tab', 9, undefined);
+                  } else if (char === ' ') {
+                      sendRemoteKeyPress(' ', 'Space', 32, ' ');
+                  } else if (/^[a-zA-Z]$/.test(char)) {
+                      sendRemoteKeyPress(char, 'Key' + char.toUpperCase(), char.toUpperCase().charCodeAt(0), char);
+                  } else if (/^[0-9]$/.test(char)) {
+                      sendRemoteKeyPress(char, 'Digit' + char, char.charCodeAt(0), char);
+                  } else {
+                      // Symbols, accented letters, emoji: no physical key maps to
+                      // them reliably, so send the text with no key code.
+                      sendRemoteKeyPress(char, '', 0, char);
+                  }
+              });
+          }
+
+          function resetMobileKeyboardInput() {
+              if (!mobileKeyboardInput) return;
+              mobileKeyboardInput.value = MOBILE_KEYBOARD_SENTINEL;
+              mobileKeyboardMirror = MOBILE_KEYBOARD_SENTINEL;
+              try {
+                  mobileKeyboardInput.setSelectionRange(1, 1);
+              } catch (err) { /* selection is unavailable while detached */ }
+          }
+
+          function stripSentinel(value) {
+              return value.split(MOBILE_KEYBOARD_SENTINEL).join('');
+          }
+
+          // Replays the difference between the field's last known value and its
+          // current one to the remote page.
+          function syncMobileKeyboardInput() {
+              if (!mobileKeyboardInput) return;
+
+              const current = mobileKeyboardInput.value;
+              const previous = mobileKeyboardMirror;
+              if (current === previous) return;
+
+              let backspaces = 0;
+              let added = [];
+
+              if (current.startsWith(MOBILE_KEYBOARD_SENTINEL) && previous.startsWith(MOBILE_KEYBOARD_SENTINEL)) {
+                  const before = Array.from(previous);
+                  const after = Array.from(current);
+                  let common = 0;
+                  while (common < before.length && common < after.length && before[common] === after[common]) {
+                      common++;
+                  }
+                  backspaces = before.length - common;
+                  added = after.slice(common);
+              } else {
+                  // The sentinel was deleted (Backspace with nothing typed) or
+                  // replaced by the keyboard: drop what was typed and resend.
+                  const typedBefore = Array.from(stripSentinel(previous)).length;
+                  added = Array.from(stripSentinel(current));
+                  backspaces = added.length === 0 ? Math.max(1, typedBefore) : typedBefore;
+              }
+
+              for (let i = 0; i < backspaces; i++) {
+                  sendRemoteKeyPress('Backspace', 'Backspace', 8, undefined);
+              }
+              sendRemoteText(added);
+
+              if (mobileKeyboardComposing) {
+                  // Rewriting the field mid-composition would cancel the composition.
+                  mobileKeyboardMirror = current;
+                  return;
+              }
+
+              const typed = stripSentinel(current);
+              if (typed.length > MOBILE_KEYBOARD_MAX_BUFFER || typed.indexOf('\n') !== -1) {
+                  resetMobileKeyboardInput();
+              } else if (!current.startsWith(MOBILE_KEYBOARD_SENTINEL) || current !== MOBILE_KEYBOARD_SENTINEL + typed) {
+                  const normalized = MOBILE_KEYBOARD_SENTINEL + typed;
+                  mobileKeyboardInput.value = normalized;
+                  mobileKeyboardMirror = normalized;
+                  try {
+                      mobileKeyboardInput.setSelectionRange(normalized.length, normalized.length);
+                  } catch (err) { /* ignore */ }
+              } else {
+                  mobileKeyboardMirror = current;
+              }
+          }
+
+          // True for keys pressed in the mobile keyboard field that never show
+          // up as input events (Enter, Tab, arrows, Escape, shortcuts) and so
+          // have to be forwarded from the key event itself.
+          function shouldForwardMobileKey(e) {
+              if (e.isComposing || e.keyCode === 229) return false;
+              if (e.key === 'Unidentified' || e.key === 'Process' || e.key === 'Dead') return false;
+              if (e.key === 'Backspace') return false;
+              const hasCommandModifier = e.ctrlKey || e.metaKey;
+              // Let the device paste into the field; the pasted text is then forwarded as input.
+              if (hasCommandModifier && (e.key === 'v' || e.key === 'V')) return false;
+              if (e.key.length === 1 && !hasCommandModifier) return false;
+              return true;
+          }
+
+          // Shrinks the player to the area above the on-screen keyboard so the
+          // remote page (and the keyboard button) stay visible while typing.
+          function fitToVisualViewport() {
+              const container = document.querySelector('.container');
+              const viewport = window.visualViewport;
+              const keyboardOpen = mobileKeyboardInput && document.activeElement === mobileKeyboardInput;
+
+              if (container) {
+                  if (viewport && keyboardOpen && Math.abs(viewport.scale - 1) < 0.01 &&
+                      viewport.height < window.innerHeight - 50) {
+                      container.style.height = Math.round(viewport.height) + 'px';
+                      window.scrollTo(0, 0);
+                  } else {
+                      container.style.height = '';
+                  }
+              }
+
+              if (activeTabId) updateCanvasSize(activeTabId);
+          }
+
+          window.addEventListener('resize', fitToVisualViewport);
+          if (window.visualViewport) {
+              window.visualViewport.addEventListener('resize', fitToVisualViewport);
+          }
+
+          if (interactive && mobileKeyboardInput && mobileKeyboardToggle) {
+              const markTouchInput = () => document.documentElement.classList.add('touch-input');
+              if (window.matchMedia && window.matchMedia('(any-pointer: coarse)').matches) {
+                  markTouchInput();
+              }
+              window.addEventListener('touchstart', markTouchInput, { passive: true, once: true });
+
+              resetMobileKeyboardInput();
+
+              mobileKeyboardInput.addEventListener('compositionstart', () => {
+                  mobileKeyboardComposing = true;
+              });
+              mobileKeyboardInput.addEventListener('compositionend', () => {
+                  mobileKeyboardComposing = false;
+                  syncMobileKeyboardInput();
+              });
+              mobileKeyboardInput.addEventListener('input', syncMobileKeyboardInput);
+
+              mobileKeyboardInput.addEventListener('focus', () => {
+                  resetMobileKeyboardInput();
+                  document.documentElement.classList.add('keyboard-open');
+                  mobileKeyboardToggle.setAttribute('aria-pressed', 'true');
+                  fitToVisualViewport();
+              });
+              mobileKeyboardInput.addEventListener('blur', () => {
+                  mobileKeyboardComposing = false;
+                  document.documentElement.classList.remove('keyboard-open');
+                  mobileKeyboardToggle.setAttribute('aria-pressed', 'false');
+                  fitToVisualViewport();
+              });
+
+              // The press must not move focus off the field, or the click below
+              // would always see the keyboard as closed and reopen it.
+              let keyboardWasOpen = false;
+              mobileKeyboardToggle.addEventListener('pointerdown', () => {
+                  keyboardWasOpen = document.activeElement === mobileKeyboardInput;
+              });
+              mobileKeyboardToggle.addEventListener('mousedown', (e) => e.preventDefault());
+              mobileKeyboardToggle.addEventListener('click', () => {
+                  if (keyboardWasOpen || document.activeElement === mobileKeyboardInput) {
+                      mobileKeyboardInput.blur();
+                  } else {
+                      // Has to run inside the tap: iOS only raises the keyboard
+                      // for a focus() made during a user gesture.
+                      mobileKeyboardInput.focus({ preventScroll: true });
+                  }
+                  keyboardWasOpen = false;
+              });
+          }
+
           // Add tab navigation and keyboard event listeners (global)
           if (interactive) {
               document.addEventListener('keydown', (e) => {
@@ -1129,6 +1412,14 @@
                   if (urlText && document.activeElement === urlText){
                     console.log("URL input is focused, skipping keydown event");
                     return;
+                  }
+
+                  // Typing in the mobile keyboard field is forwarded from its
+                  // input events; only keys that produce no input come through here.
+                  if (e.target === mobileKeyboardInput) {
+                      if (!shouldForwardMobileKey(e)) return;
+                      e.preventDefault();
+                      if (e.key === 'Enter') resetMobileKeyboardInput();
                   }
 
                   if (!activeTabId || !tabs[activeTabId] || !tabs[activeTabId].websocket) return;
@@ -1141,7 +1432,9 @@
                       pageId: activeTabId,
                       event: {
                           type: 'keyDown',
-                          text: e.key.length === 1 ? e.key : undefined,
+                          // Enter needs its character too: without it Chrome
+                          // fires no keypress and forms are not submitted.
+                          text: e.key.length === 1 ? e.key : (e.key === 'Enter' ? '\r' : undefined),
                           code: e.code,
                           key: e.key,
                           keyCode: e.keyCode
@@ -1152,6 +1445,7 @@
               document.addEventListener('keyup', (e) => {
                   // Skip if URL input is focused
                   if (urlText && document.activeElement === urlText) return;
+                  if (e.target === mobileKeyboardInput && !shouldForwardMobileKey(e)) return;
                   if (!activeTabId || !tabs[activeTabId] || !tabs[activeTabId].websocket) return;
 
                   const ws = tabs[activeTabId].websocket;
@@ -1467,11 +1761,20 @@
                   return;
               }
 
+              const parentWidth = container.clientWidth;
               const parentHeight = container.clientHeight;
+              const aspectRatio = tabData.currentImageWidth / tabData.currentImageHeight;
 
-              // Scale to height while maintaining aspect ratio
-              const targetHeight = parentHeight;
-              const targetWidth = targetHeight * (tabData.currentImageWidth / tabData.currentImageHeight);
+              // Fit the whole frame inside the container, keeping its aspect
+              // ratio: scale to the height, or to the width when the container
+              // is narrower than that (a phone held upright), so that no part
+              // of the page is cut off.
+              let targetHeight = parentHeight;
+              let targetWidth = targetHeight * aspectRatio;
+              if (parentWidth > 0 && targetWidth > parentWidth) {
+                  targetWidth = parentWidth;
+                  targetHeight = targetWidth / aspectRatio;
+              }
 
               // Account for device pixel ratio
               const dpr = window.devicePixelRatio || 1;
@@ -1484,8 +1787,8 @@
               ctx.scale(dpr, dpr);
 
               // Set display size
-              canvas.style.height = '100%';
-              canvas.style.width = 'auto';
+              canvas.style.height = targetHeight + 'px';
+              canvas.style.width = targetWidth + 'px';
 
               // Redraw the last image if available
               if (tabData.lastImageData) {
@@ -1648,6 +1951,11 @@
                   }
 
                   const isCtrlOrCmd = e.ctrlKey || e.metaKey;
+
+                  // Pasting into the mobile keyboard field is forwarded as input.
+                  if (e.target === mobileKeyboardInput && isCtrlOrCmd && (e.key === 'v' || e.key === 'V')) {
+                      return;
+                  }
 
                   if (isCtrlOrCmd && (e.key === 'c' || e.key === 'C')) {
                       e.preventDefault();
